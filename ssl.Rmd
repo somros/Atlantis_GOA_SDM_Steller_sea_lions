@@ -1,0 +1,380 @@
+---
+title: "Steller sea lions in Atlantis GOA"
+author: "Alberto Rovellini"
+date: "10/27/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r}
+library(readxl)
+library(sdmTMB)
+library(tidyverse)
+library(rbgm)
+library(sf)
+library(viridis)
+library(maps)
+library(mapdata)
+library(data.table)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+# Purpose
+
+Explore Steller sea lion data for the GOA from Katie Sweenie and Brian Fadely. For citation, refer to Johnson, D., and L. Fritz. 2013. Pup/ Nonpup ratios in WDPS Steller sea lion population. Memo submitted to Alaska Science Center. August 2013. 17 pp.
+
+Sites used by Steller sea lions are rookeries and haulouts. Rookeries are sites used during the breeding seasons where pups occur. Haulouts are used more consistently throughout the year by non-breeding adults and other ages. See [here](https://www.fisheries.noaa.gov/resource/data/steller-sea-lion-haulout-and-rookery-locations-united-states-may-5-2016). We will need to differentiate between these: females at the rookeries in the summer travel not too far from the colony, with much broader ranges in the winter time (17.1 km and 133 km on an average trip for females in summer and winter respectively, although for a small sample size in [Merrick and Loughlin 1997](https://doi.org/10.1139/z97-099)).
+
+The range around the rookeries will be smaller than around the haulouts. To make matters more complicated, a rookery is also a haulout, but not *vice versa* (I think). Therefore, rookery sites also count towards winter distributions. It also seems possible that some sites are used as haulouts at one point and as rookeries later on, or *vice versa* (for example where no pups were counted until a certain year and then they appear more or less regularly).
+
+From communications with Katie Sweeney and others it seems that they no longer attempt to correct the counts to capture at-sea animals (they used to apply a correction factor way back but they have discontinued it because it was based on population estimates from the 1970's - there is ongoing research to re-evaluate this but way down the line).
+
+# Read data
+
+## Alaska
+
+Data shared by Katie Sweeney and Brian Fadely. These are aerial surveys conducted by the National Marine Mammal Laboratory (NMML). See [here](https://repository.library.noaa.gov/view/noaa/10474/noaa_10474_DS1.pdf) and references therein for information on the surveys. This data is used to conduct Steller sea lion stock assessments for the [Eastern](https://media.fisheries.noaa.gov/dam-migration/2019_sars_alaska_steller_sea_lion_-_eastern_us.pdf) and [Western](https://media.fisheries.noaa.gov/2021-08/STELLER%20SEA%20LION%20%28Eumetopias%20jubatus%29%20-%20Western%20U.S.%20Stock.pdf) GOA with the use of a [Bayesian modelling approach](https://besjournals.onlinelibrary.wiley.com/doi/pdf/10.1111/2041-210X.12231) to estimate missing counts.
+
+```{r}
+# SSL
+#pups
+wdps_pup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'wdpspup')
+edps_pup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpspup')
+
+#non-pups
+wdps_nonpup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'wdpsnp')
+edps_nonpup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpsnp')
+
+#correction factor for non-pups
+corr <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpsnp_corr')
+
+# Sites
+sites <- read.csv('../data/sites/NCEI-0129877_US_SSL_Sites.csv')
+
+# Atlantis
+atlantis_bgm <- read_bgm('../data/GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+atlantis_crs <- atlantis_bgm$extra$projection
+atlantis_bbox <- atlantis_box %>% st_bbox()
+```
+
+Process the raw data. 
+```{r}
+# apply correction to edps data
+edps_nonpup_long <- edps_nonpup %>% pivot_longer(!c(SITE,REGION), names_to = 'YEAR', values_to = 'COUNTS')
+corr_long <- corr %>% pivot_longer(!c(SITE,REGION), names_to = 'YEAR', values_to = 'CORRECTION')
+
+edps_nonpup_long <- edps_nonpup_long %>% left_join(corr_long, by = c('SITE','REGION','YEAR')) %>%
+  mutate(COUNTS=ifelse(CORRECTION==1,COUNTS*3.5,COUNTS)) %>%
+  ungroup() %>% 
+  select(-CORRECTION)
+
+# pivot the remaining three datasets to long format
+wdps_nonpup_long <- wdps_nonpup %>% pivot_longer(!c(SITE,REGION), names_to = 'YEAR', values_to = 'COUNTS')
+wdps_pup_long <- wdps_pup %>% pivot_longer(!c(SITE,REGION), names_to = 'YEAR', values_to = 'COUNTS')
+edps_pup_long <- edps_pup %>% pivot_longer(!c(SITE,REGION), names_to = 'YEAR', values_to = 'COUNTS')
+
+# bind pups and non-pups 
+nonpup_long <- rbind(wdps_nonpup_long,edps_nonpup_long)
+pup_long <- rbind(wdps_pup_long,edps_pup_long)
+
+# join coordinates from sites data
+nonpup_long <- nonpup_long %>% left_join(sites %>% select(SITENAME,REGION,ROOKERY,LATITUDE,LONGITUDE), by = c('SITE'='SITENAME','REGION'='REGION'))
+pup_long <- pup_long %>% left_join(sites %>% select(SITENAME,REGION,ROOKERY,LATITUDE,LONGITUDE), by = c('SITE'='SITENAME','REGION'='REGION'))
+
+# coordinates for some sites are missing
+missing_nonpup <- nonpup_long %>% filter(is.na(LONGITUDE)) %>% select(SITE) %>% distinct() %>% pull()
+missing_pup <- pup_long %>% filter(is.na(LONGITUDE)) %>% select(SITE) %>% distinct() %>% pull()
+missing <- sort(unique(c(missing_nonpup,missing_pup)))
+
+# some missing names are more specific in the site data set than in the SSL counts. We can get those
+# the missing sites also miss information on whether the site is a rookery or a haulout.
+
+nonpup_long <- nonpup_long %>% # for non-pups
+  rowwise() %>%
+  mutate(LONGITUDE = ifelse(SITE %in% missing, sites[grep(pattern=SITE,x=sites$SITENAME)[1],]$LONGITUDE, LONGITUDE),
+         LATITUDE = ifelse(SITE %in% missing, sites[grep(pattern=SITE,x=sites$SITENAME)[1],]$LATITUDE, LATITUDE)) %>% 
+  ungroup()
+
+pup_long <- pup_long %>% # and pups
+  rowwise() %>%
+  mutate(LONGITUDE = ifelse(SITE %in% missing, sites[grep(pattern=SITE,x=sites$SITENAME)[1],]$LONGITUDE, LONGITUDE),
+         LATITUDE = ifelse(SITE %in% missing, sites[grep(pattern=SITE,x=sites$SITENAME)[1],]$LATITUDE, LATITUDE)) %>% 
+  ungroup()
+
+# some are still missing, enter coordinates manually
+missing_nonpup1 <- nonpup_long %>% filter(is.na(LONGITUDE)) %>% select(SITE) %>% distinct()
+missing_pup1 <- pup_long %>% filter(is.na(LONGITUDE)) %>% select(SITE) %>% distinct()
+missing1 <- rbind(missing_nonpup1,missing_pup1) %>%
+  mutate(LONGITUDE = c(-156.639,-149.467,-130.616,-130.917,-130.967),
+         LATITUDE = c(56.044,59.742,53.490,51.962,52.208)) 
+
+# add to the data
+nonpup_long <- nonpup_long %>% # for non-pups
+  rowwise() %>%
+  mutate(LONGITUDE = ifelse(SITE %in% missing1$SITE, missing1[missing1$SITE==SITE,]$LONGITUDE, LONGITUDE),
+         LATITUDE = ifelse(SITE %in% missing1$SITE, missing1[missing1$SITE==SITE,]$LATITUDE, LATITUDE)) %>% 
+  ungroup()
+
+pup_long <- pup_long %>% # and pups
+  rowwise() %>%
+  mutate(LONGITUDE = ifelse(SITE %in% missing1$SITE, missing1[missing1$SITE==SITE,]$LONGITUDE, LONGITUDE),
+         LATITUDE = ifelse(SITE %in% missing1$SITE, missing1[missing1$SITE==SITE,]$LATITUDE, LATITUDE)) %>% 
+  ungroup()
+
+# fill in the rookery column. If they are non-pup sites only, set ROOKERY=0, if pup ROOKERY=1. If both, set ROOKERY=1.
+# this will need revision, because sites where pups were counted that appear in the pups set are labelled as ROOKERY=0. Approximate it for now.
+only_nonpup <- setdiff(missing_nonpup,missing_pup)
+
+nonpup_long <- nonpup_long %>%
+  rowwise() %>%
+  mutate(ROOKERY=ifelse(!is.na(ROOKERY),ROOKERY,ifelse(SITE %in% only_nonpup,0,1))) %>% 
+  ungroup()
+
+pup_long <- pup_long %>% # if pups are there, assume it is a rookery
+  rowwise() %>% 
+  mutate(ROOKERY=ifelse(!is.na(ROOKERY),ROOKERY,1)) %>% 
+  ungroup()
+```
+
+View in space.
+```{r}
+nonpup_sf <- nonpup_long %>% st_as_sf(coords=c('LONGITUDE','LATITUDE'),crs=4326)
+nonpup_bbox <- nonpup_sf %>% st_bbox()
+
+coast <- maps::map("worldHires", c("USA","Canada"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_combine()
+
+nonpup_sf %>% filter(YEAR>1989 & YEAR!='RCA') %>% 
+  ggplot()+
+  geom_sf(aes(color=COUNTS, shape=factor(ROOKERY)))+
+  scale_color_viridis()+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(nonpup_bbox$xmin,nonpup_bbox$xmax), ylim=c(nonpup_bbox$ymin,nonpup_bbox$ymax))+
+  theme_minimal()+
+  facet_wrap(~YEAR)+
+  labs(title='Steller sea lion haulouts and rookeries in Alaska')
+```
+If we are after distributions in the 1990's use 1990-1999 and pool data from those years. Then use similar technique to the seabirds to draw circles around the colonies, depending on the foraging range. Then map those to the Atlantis boxes.
+
+Need to read about trip distance and duration but it seems to change between males and females and also between seasons, which will allow us to capture where they go. 
+
+Subset to data from the 1990's, take averages for each colony. 
+```{r}
+nonpup_sf <- nonpup_sf %>% filter(YEAR %in% (1990:1999)) # use the 90's
+
+nonpup_avg_ak <- nonpup_sf %>% group_by(SITE,REGION,ROOKERY) %>% summarise(COUNTS=mean(COUNTS,na.rm=TRUE))
+
+# NaN where all counts in the 1990's were NA's. Drop those altogether
+nonpup_avg_ak <- nonpup_avg_ak %>% filter(!is.nan(COUNTS))
+
+nonpup_avg_ak %>%  
+  ggplot()+
+  geom_sf(data=coast_sf)+
+  geom_sf(aes(color=COUNTS, shape = factor(ROOKERY)), size=2)+
+  scale_color_viridis()+
+  coord_sf(xlim=c(nonpup_bbox$xmin,nonpup_bbox$xmax), ylim=c(nonpup_bbox$ymin,nonpup_bbox$ymax))+
+  theme_minimal()+
+  labs(title='Steller sea lion haulouts and rookeries in Alaska')
+```
+
+## British Columbia
+
+Data from [DFO](https://open.canada.ca/data/en/dataset/0083baf1-8145-4207-a84f-3d85ef2943a5).
+
+### Correction factor to account for animals at sea 
+
+In [DFO 2020](https://waves-vagues.dfo-mpo.gc.ca/Library/40951753.pdf) we read: "Satellite telemetry data collected during summer indicated that peak numbers of animals are hauled out during daylight hours, and estimated that 67% of animals were hauled out during surveys conducted in the summer breeding season. A survey correction factor of 1.48 was therefore applied to non-pup counts. In contrast, animals spent less time on land during the non-breeding season, and haulout bouts were less synchronized. As a result, it is estimated that only 37% of animals were hauled out and counted during winter surveys". However, NOAA does not seem to apply the correction factor, so maybe we just stick to counts here as well. The data downloaded from DFO seem to come without correction factor (see [here](https://pacgis01.dfo-mpo.gc.ca/FGPPublic/Steller_sea_lion/SSL_Data_Dictionary.htm)).
+
+```{r}
+bc_data <- read.csv('../data/BC/Steller_Sea_Lion_Summer_counts_from_Haulout_Locations.csv')
+
+bc_data <- bc_data %>%
+  mutate(across(starts_with('COUNT'), as.numeric)) %>%
+  filter(!is.na(LATITUDE))
+
+# sum extrapolated and real values, then drop the extrapolated values
+bc_data <- bc_data %>%
+  rowwise() %>% # most of the time the below will result into NAs. Are those zeroes or missing counts?
+  mutate(COUNT.NON.PUP = ifelse(is.na(COUNT.NON.PUP),COUNT.NON.PUP.INTERPOLATED.EXTRAPOLATED,COUNT.NON.PUP),
+         COUNT.PUP = ifelse(is.na(COUNT.PUP),COUNT.PUP.INTERPOLATED.EXTRAPOLATED,COUNT.PUP),
+         COUNT.PUP.PRE.ROOKERY = ifelse(is.na(COUNT.PUP.PRE.ROOKERY),COUNT.PUP.PRE.ROOKERY.INTERPOLATED.EXTRAPOLATED,COUNT.PUP.PRE.ROOKERY)) %>% 
+  ungroup()
+  
+# long format
+bc_long <- bc_data %>% pivot_longer(cols = starts_with('COUNT'), names_to = 'STAGE', values_to = 'COUNTS')
+```
+
+There seem to be more options regarding the site type here, with distinctions between rookeries, winter haulouts, year-round haulouts, and so on. Probably best simplify this to rookery and haulouts again. We also only really care about the non-pups here. Most (almost all?) pups seem to be found at the sites labelled as R or Y/R.
+```{r}
+bc_long <- bc_long %>% 
+  rowwise() %>% 
+  mutate(ROOKERY=ifelse(SITE.TYPE %in% c('R','Y/R'),1,0)) %>% 
+  ungroup()
+```
+
+View.
+```{r}
+bc_sf <- bc_long %>% st_as_sf(coords=c('LONGITUDE','LATITUDE'), crs=4326)
+bc_bbox <- bc_sf %>% st_bbox()
+
+bc_sf %>% filter(STAGE=='COUNT.NON.PUP') %>%
+  ggplot()+
+  geom_sf(data=coast_sf)+
+  geom_sf(aes(color=COUNTS, shape = factor(ROOKERY)), size=2)+
+  scale_color_viridis()+
+  coord_sf(xlim=c(bc_bbox$xmin,bc_bbox$xmax), ylim=c(bc_bbox$ymin,bc_bbox$ymax))+
+  theme_minimal()+
+  facet_wrap(~SURVEY.YEAR)+
+  labs(title='Steller sea lion haulouts and rookeries in British Columbia')
+```
+
+We need to use data from the same period, although there are fewer sampling years in the BC data from the 1990's (1992, 1994, 1998). Take averages. Work only with non-pups.
+```{r}
+nonpup_avg_bc <- bc_sf %>% filter(STAGE=='COUNT.NON.PUP' & SURVEY.YEAR %in% c(1992,1994,1998)) %>%
+  group_by(REGION,SITE,ROOKERY) %>% 
+  summarise(COUNTS=mean(COUNTS,na.rm=TRUE)) %>%
+  ungroup()
+
+# NaN where all counts in the 1990's were NA's. Drop those altogether
+nonpup_avg_bc <- nonpup_avg_bc %>% filter(!is.nan(COUNTS))
+
+nonpup_avg_bc %>% ggplot()+
+  geom_sf(data=coast_sf)+
+  geom_sf(aes(color=COUNTS, shape = factor(ROOKERY)), size=3)+
+  scale_color_viridis()+
+  coord_sf(xlim=c(bc_bbox$xmin,bc_bbox$xmax), ylim=c(bc_bbox$ymin,bc_bbox$ymax))+
+  theme_minimal()+
+  labs(title='Steller sea lion haulouts and rookeries in British Columbia')
+```
+
+## Stitch AK and BC data
+
+Rearrange the BC data so that it can be stitched to the AK data, then bind the two data frames. Note that here we are not considering potential bias in the methods between AK and BC, and also there are different sampling years between the two.
+```{r}
+nonpup_avg_bc <- nonpup_avg_bc %>% 
+  select(SITE,REGION,ROOKERY,COUNTS) %>%
+  mutate(REGION='BC')
+
+# bind
+nonpup_avg <- rbind(nonpup_avg_ak,nonpup_avg_bc)
+
+# view
+nonpup_avg %>% st_transform(crs=atlantis_crs) %>% 
+  ggplot()+
+  geom_sf(data=coast_sf)+
+  geom_sf(aes(color=log1p(COUNTS),shape=factor(ROOKERY)), size=2)+
+  scale_color_viridis()+
+  coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
+  theme_minimal()+
+  labs(title='Steller sea lions haulouts and rookeries in the GOA',color='Log-counts')
+```
+
+# Circles around colonies
+
+Incorporate the different dispersal from rookery vs haulout here.
+```{r}
+dist_rookery <- 17*1000 #m # average summer female trip distance from Merrick and Loughlin (1997) 
+dist_haulout <- 133*1000 #m average winter female trip distance from Merrick and Loughlin (1997)
+
+ssl_colonies <- nonpup_avg %>% 
+  st_transform(crs=atlantis_crs) %>% 
+  rowwise() %>% 
+  mutate(foraging_distance=ifelse(ROOKERY==1,dist_rookery,dist_haulout)) 
+
+ssl_colonies <-ssl_colonies %>% 
+  st_buffer(dist=ssl_colonies$foraging_distance) %>% 
+  ungroup()
+
+coast_sf <- coast_sf %>% st_transform(crs=atlantis_crs)
+
+# intersect each colony with the coast data
+
+colony_at_sea <- ssl_colonies %>% st_difference(coast_sf) # this takes time
+
+colony_at_sea %>% ggplot()+
+  geom_sf(aes(fill=log1p(COUNTS)),alpha=0.5)+
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
+  theme_minimal()+
+  labs(title='Steller sea lions',fill='Log-counts')
+```
+
+Now compute the area for each of those buffers.
+```{r}
+colony_at_sea <- colony_at_sea %>% mutate(colony_area_at_sea=st_area(colony_at_sea))
+```
+
+Write a function that takes each individual colony geometry and does st_intersect() with each Atlantis box. Bound to take a very long time.
+```{r, warning=FALSE}
+# shed some variables
+box_thin <- atlantis_box %>% select(.bx0,boundary)
+
+# calculate the area of the intersection with each atlantis box in the model, and scale the n of ind for that colony by the area of the intersection
+box_colony_overlap <- function(this_colony,colony_data,box_data){
+  
+  colony_data <- colony_data %>% filter(SITE==this_colony)
+  
+  this_intersection <- box_data %>% st_intersection(colony_data) # intersection between the box and the colony
+  this_intersection <- this_intersection %>% 
+    mutate(colony_box_area = st_area(this_intersection), # area of the intersection
+           proportion_of_colony_area = as.numeric(colony_box_area/colony_area_at_sea), # proportion of intersection to tot colony area
+           abundance_this_box = proportion_of_colony_area*COUNTS) %>% # attribute to this box the animals from this colony based on the calc'ed proportion
+    st_set_geometry(NULL) 
+    
+  return(this_intersection)
+}
+
+all_IDs <- unique(colony_at_sea$SITE)
+
+atlantis_abundances <- rbindlist(purrr::map(all_IDs,box_colony_overlap,colony_data=colony_at_sea,box_data=box_thin))
+```
+
+Do a quick check that the abundances adds up (i.e. no cases where the disaggregated abundance by box is higher than the original abundance of the colony.)
+```{r}
+# check <- atlantis_abundances %>% 
+#   group_by(SITE,COUNTS) %>% 
+#   summarise(test = sum(abundance_this_box)) %>% 
+#   ungroup() %>% 
+#   mutate(diff=COUNTS-test)
+```
+Seems to be in order - only cases where the biomass exceeds the box biomass because the radius of the colony spans outside the model domain.
+
+Add up abundances by box.
+```{r}
+atlantis_abundances$abundance_this_box[is.nan(atlantis_abundances$abundance_this_box)] <- NA
+
+abundance_by_box <- atlantis_abundances %>% group_by(.bx0) %>% summarise(abundance = sum(abundance_this_box,na.rm=TRUE)) %>% ungroup()
+```
+
+Join with box set again for the geometry and map.
+```{r}
+atlantis_ssl <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0')
+
+atlantis_ssl %>% 
+  rowwise() %>%
+  mutate(abundance = ifelse(isTRUE(boundary),NA,abundance)) %>%
+  ungroup() %>%
+  ggplot()+
+  geom_sf(aes(fill=log1p(as.numeric(abundance/(area/1000000)))))+ # back to km2
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf, fill = 'grey')+
+  coord_sf(xlim = c(atlantis_bbox$xmin, atlantis_bbox$xmax), ylim = c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
+  theme_bw()+
+  labs(title='Steller sea lions in Atlantis GOA', fill = expression(paste('Logdensity (ind ',km^-2, ')')))
+
+#ggsave(paste0(groups[4],'.png'), p, dpi=600, width=10, height=4)
+```
+
+Results depend on the foraging range. Need to do some reading on that - check the papers Brian shared on feeding. 
