@@ -35,9 +35,11 @@ Explore Steller sea lion data for the GOA from Katie Sweenie and Brian Fadely. F
 
 Sites used by Steller sea lions are rookeries and haulouts. Rookeries are sites used during the breeding seasons where pups occur. Haulouts are used more consistently throughout the year by non-breeding adults and other ages. See [here](https://www.fisheries.noaa.gov/resource/data/steller-sea-lion-haulout-and-rookery-locations-united-states-may-5-2016). We will need to differentiate between these: females at the rookeries in the summer travel not too far from the colony, with much broader ranges in the winter time (17.1 km and 133 km on an average trip for females in summer and winter respectively, although for a small sample size in [Merrick and Loughlin 1997](https://doi.org/10.1139/z97-099)).
 
-The range around the rookeries will be smaller than around the haulouts. To make matters more complicated, a rookery is also a haulout, but not *vice versa* (I think). Therefore, rookery sites also count towards winter distributions. It also seems possible that some sites are used as haulouts at one point and as rookeries later on, or *vice versa* (for example where no pups were counted until a certain year and then they appear more or less regularly).
+The range around the rookeries will be smaller than around the haulouts. To make matters more complicated, a rookery is also a haulout, and there can be pups at a rookery (the cutoff seems to be 50 pups). Therefore, rookery sites also count towards winter distributions. 
 
 From communications with Katie Sweeney and others it seems that they no longer attempt to correct the counts to capture at-sea animals (they used to apply a correction factor way back but they have discontinued it because it was based on population estimates from the 1970's - there is ongoing research to re-evaluate this but way down the line).
+
+This workflow uses data from Alaska and from British Columbia.
 
 # Read data
 
@@ -270,7 +272,7 @@ nonpup_avg_bc <- nonpup_avg_bc %>%
 nonpup_avg <- rbind(nonpup_avg_ak,nonpup_avg_bc)
 
 # view
-nonpup_avg %>% st_transform(crs=atlantis_crs) %>% 
+p <- nonpup_avg %>% st_transform(crs=atlantis_crs) %>% 
   ggplot()+
   geom_sf(data=coast_sf)+
   geom_sf(aes(color=log1p(COUNTS),shape=factor(ROOKERY)), size=2)+
@@ -278,11 +280,17 @@ nonpup_avg %>% st_transform(crs=atlantis_crs) %>%
   coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
   theme_minimal()+
   labs(title='Steller sea lions haulouts and rookeries in the GOA',color='Log-counts')
+
+p
+
+# ggsave('colonies.png',p,width=10,height=5,unit='in')
 ```
 
-# Circles around colonies
+# Summer distributions
 
-Incorporate the different dispersal from rookery vs haulout here.
+Incorporate the different dispersal from rookery vs haulout here. We use values of foraging trip distance from haulout for summer and winter adult females here as a first crude approximation of movements from rookeries (where the pups are) and haulouts. This is more of a placeholder for now, and we will need to account for sex ratio (assume males can move farther than pupping females), proportion of breeders (not all females will be pupping), age structure (pups, juveniles and adults have different dispersal), and season (they travel farther in winter) at the colony. Even that will be an approximation, for example (some?) males in the summer haul out and fast. For now the below is to say that SSL do not move far from rookeries because the pups are there, but move far from haulouts because they are non-reproductive sites. 
+
+These will be for S2 and S3.
 ```{r}
 dist_rookery <- 17*1000 #m # average summer female trip distance from Merrick and Loughlin (1997) 
 dist_haulout <- 133*1000 #m average winter female trip distance from Merrick and Loughlin (1997)
@@ -302,13 +310,17 @@ coast_sf <- coast_sf %>% st_transform(crs=atlantis_crs)
 
 colony_at_sea <- ssl_colonies %>% st_difference(coast_sf) # this takes time
 
-colony_at_sea %>% ggplot()+
+p1 <- colony_at_sea %>% ggplot()+
   geom_sf(aes(fill=log1p(COUNTS)),alpha=0.5)+
   scale_fill_viridis()+
   geom_sf(data=coast_sf)+
   coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
   theme_minimal()+
-  labs(title='Steller sea lions',fill='Log-counts')
+  labs(title='Steller sea lions based on summer and winter dispersal',fill='Log-counts')
+
+p1
+
+# ggsave('ranges_from_colonies.png',p1,width=10,height=5,unit='in')
 ```
 
 Now compute the area for each of those buffers.
@@ -360,21 +372,120 @@ abundance_by_box <- atlantis_abundances %>% group_by(.bx0) %>% summarise(abundan
 
 Join with box set again for the geometry and map.
 ```{r}
-atlantis_ssl <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0')
+atlantis_ssl <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0') %>%
+  mutate(log_abundance = log1p(abundance),
+         density = abundance/area*1000000, # back to km2
+         logdensity = log1p(density)) 
 
-atlantis_ssl %>% 
+p2 <- atlantis_ssl %>% 
   rowwise() %>%
   mutate(abundance = ifelse(isTRUE(boundary),NA,abundance)) %>%
   ungroup() %>%
   ggplot()+
-  geom_sf(aes(fill=log1p(as.numeric(abundance/(area/1000000)))))+ # back to km2
+  geom_sf(aes(fill=logdensity))+ # back to km2
   scale_fill_viridis()+
   geom_sf(data=coast_sf, fill = 'grey')+
   coord_sf(xlim = c(atlantis_bbox$xmin, atlantis_bbox$xmax), ylim = c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
   theme_bw()+
-  labs(title='Steller sea lions in Atlantis GOA', fill = expression(paste('Logdensity (ind ',km^-2, ')')))
+  labs(title='Steller sea lions in Atlantis GOA', fill = expression(paste('Logdensity \n (ind ',km^-2, ')')))
+p2
 
-#ggsave(paste0(groups[4],'.png'), p, dpi=600, width=10, height=4)
+# ggsave('ssl_box.png',p2,width=10,height=5,unit='in')
 ```
 
-Results depend on the foraging range. Need to do some reading on that - check the papers Brian shared on feeding. 
+Results depend on the foraging range. 
+
+# Winter distributions
+
+Assume that all animals (the same amount) move with their winter range for S1 and S4.
+```{r}
+dist_colony <- 133*1000 #m average winter female trip distance from Merrick and Loughlin (1997)
+
+ssl_colonies_winter <- nonpup_avg %>% 
+  st_transform(crs=atlantis_crs) %>% 
+  rowwise() %>% 
+  mutate(foraging_distance=dist_colony) 
+
+ssl_colonies_winter <-ssl_colonies_winter %>% 
+  st_buffer(dist=ssl_colonies_winter$foraging_distance) %>% 
+  ungroup()
+
+# intersect each colony with the coast data
+
+colony_at_sea_winter <- ssl_colonies_winter %>% st_difference(coast_sf) # this takes time
+
+p2 <- colony_at_sea_winter %>% ggplot()+
+  geom_sf(aes(fill=log1p(COUNTS)),alpha=0.5)+
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin, atlantis_bbox$ymax+50000))+
+  theme_minimal()+
+  labs(title='Steller sea lions based on winter dispersal',fill='Log-counts')
+
+p2
+
+# ggsave('ranges_from_colonies.png',p1,width=10,height=5,unit='in')
+```
+
+Now compute the area for each of those buffers.
+```{r}
+colony_at_sea_winter <- colony_at_sea_winter %>% mutate(colony_area_at_sea=st_area(colony_at_sea_winter))
+```
+
+Calculate overlap based on function above.
+```{r, warning=FALSE}
+atlantis_abundances_winter <- rbindlist(purrr::map(all_IDs,box_colony_overlap,colony_data=colony_at_sea_winter,box_data=box_thin))
+```
+
+Add up abundances by box.
+```{r}
+atlantis_abundances_winter$abundance_this_box[is.nan(atlantis_abundances_winter$abundance_this_box)] <- NA
+
+abundance_by_box_winter <- atlantis_abundances_winter %>% group_by(.bx0) %>% summarise(abundance = sum(abundance_this_box,na.rm=TRUE)) %>% ungroup()
+```
+
+Join with box set again for the geometry and map.
+```{r}
+atlantis_ssl_winter <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box_winter, by = '.bx0') %>%
+  mutate(log_abundance = log1p(abundance),
+         density = abundance/area*1000000, # back to km2
+         logdensity = log1p(density)) 
+
+p3 <- atlantis_ssl_winter %>% 
+  rowwise() %>%
+  mutate(abundance = ifelse(isTRUE(boundary),NA,abundance)) %>%
+  ungroup() %>%
+  ggplot()+
+  geom_sf(aes(fill=logdensity))+ # back to km2
+  scale_fill_viridis()+
+  geom_sf(data=coast_sf, fill = 'grey')+
+  coord_sf(xlim = c(atlantis_bbox$xmin, atlantis_bbox$xmax), ylim = c(atlantis_bbox$ymin, atlantis_bbox$ymax))+
+  theme_bw()+
+  labs(title='Steller sea lions in Atlantis GOA', fill = expression(paste('Logdensity \n (ind ',km^-2, ')')))
+p3
+
+# ggsave('ssl_box.png',p2,width=10,height=5,unit='in')
+```
+
+Write out summer and winter distributions.
+```{r}
+s2_s3 <- atlantis_ssl %>% 
+  select(.bx0,abundance) %>% 
+  st_set_geometry(NULL) %>% 
+  mutate(prop=abundance/sum(abundance,na.rm=T)) %>% 
+  select(-abundance)
+
+s1_s4 <- atlantis_ssl_winter %>% 
+  select(.bx0,abundance) %>% 
+  st_set_geometry(NULL) %>% 
+  mutate(prop=abundance/sum(abundance,na.rm=T)) %>% 
+  select(-abundance)
+
+# turn NAs to 0 for now
+s2_s3[is.na(s2_s3)] <- 0
+s1_s4[is.na(s1_s4)] <- 0
+
+# write out
+write.csv(s2_s3, 'ssl_s2_s3.csv', row.names = F)
+write.csv(s1_s4, 'ssl_s1_s4.csv', row.names = F)
+```
