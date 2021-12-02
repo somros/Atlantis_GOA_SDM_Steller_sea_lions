@@ -48,17 +48,28 @@ This workflow uses data from Alaska and from British Columbia.
 Data shared by Katie Sweeney and Brian Fadely. These are aerial surveys conducted by the National Marine Mammal Laboratory (NMML). See [here](https://repository.library.noaa.gov/view/noaa/10474/noaa_10474_DS1.pdf) and references therein for information on the surveys. This data is used to conduct Steller sea lion stock assessments for the [Eastern](https://media.fisheries.noaa.gov/dam-migration/2019_sars_alaska_steller_sea_lion_-_eastern_us.pdf) and [Western](https://media.fisheries.noaa.gov/2021-08/STELLER%20SEA%20LION%20%28Eumetopias%20jubatus%29%20-%20Western%20U.S.%20Stock.pdf) GOA with the use of a [Bayesian modelling approach](https://besjournals.onlinelibrary.wiley.com/doi/pdf/10.1111/2041-210X.12231) to estimate missing counts.
 
 ```{r}
-# SSL
+#SSL all
 #pups
-wdps_pup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'wdpspup')
-edps_pup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpspup')
+wdps_pup <- read_excel('../data/sslcountdata/GULF_SSLcountsRAW.xlsx', sheet = 'wdpspup')
+edps_pup <- read_excel('../data/sslcountdata/GULF_SSLcountsRAW.xlsx', sheet = 'edpspup')
 
 #non-pups
-wdps_nonpup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'wdpsnp')
-edps_nonpup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpsnp')
+wdps_nonpup <- read_excel('../data/sslcountdata/GULF_SSLcountsRAW.xlsx', sheet = 'wdpsnp')
+edps_nonpup <- read_excel('../data/sslcountdata/GULF_SSLcountsRAW.xlsx', sheet = 'edpsnp')
 
 #correction factor for non-pups
-corr <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpsnp_corr')
+corr <- read_excel('../data/sslcountdata/GULF_SSLcountsRAW.xlsx', sheet = 'edpsnp_corr')
+
+# #pups
+# wdps_pup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'wdpspup')
+# edps_pup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpspup')
+# 
+# #non-pups
+# wdps_nonpup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'wdpsnp')
+# edps_nonpup <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpsnp')
+# 
+# #correction factor for non-pups
+# corr <- read_excel('../data/sslcountdata/SSLGOA_rawcounts.xlsx', sheet = 'edpsnp_corr')
 
 # Sites
 sites <- read.csv('../data/sites/NCEI-0129877_US_SSL_Sites.csv')
@@ -118,8 +129,8 @@ pup_long <- pup_long %>% # and pups
 missing_nonpup1 <- nonpup_long %>% filter(is.na(LONGITUDE)) %>% select(SITE) %>% distinct()
 missing_pup1 <- pup_long %>% filter(is.na(LONGITUDE)) %>% select(SITE) %>% distinct()
 missing1 <- rbind(missing_nonpup1,missing_pup1) %>%
-  mutate(LONGITUDE = c(-156.639,-149.467,-130.616,-130.917,-130.967),
-         LATITUDE = c(56.044,59.742,53.490,51.962,52.208)) 
+  mutate(LONGITUDE = c(-149.467,-156.639, -160.298,-167.073,-171.274,-130.616,-130.917,-130.967),
+         LATITUDE = c(59.742,56.044,58.680,53.925,52.488,53.490,51.962,52.208)) 
 
 # add to the data
 nonpup_long <- nonpup_long %>% # for non-pups
@@ -147,10 +158,13 @@ pup_long <- pup_long %>% # if pups are there, assume it is a rookery
   rowwise() %>% 
   mutate(ROOKERY=ifelse(!is.na(ROOKERY),ROOKERY,1)) %>% 
   ungroup()
+
+# drop ST. GEORGE in E ALEU because it is a site in the BS that gets erroneously mapped to California
+nonpup_long <- nonpup_long %>% filter(SITE!='ST. GEORGE')
 ```
 
 View in space.
-```{r}
+```{r, fig.width=12, fig.height=18}
 nonpup_sf <- nonpup_long %>% st_as_sf(coords=c('LONGITUDE','LATITUDE'),crs=4326)
 nonpup_bbox <- nonpup_sf %>% st_bbox()
 
@@ -164,7 +178,7 @@ nonpup_sf %>% filter(YEAR>1989 & YEAR!='RCA') %>%
   geom_sf(data=coast_sf)+
   coord_sf(xlim=c(nonpup_bbox$xmin,nonpup_bbox$xmax), ylim=c(nonpup_bbox$ymin,nonpup_bbox$ymax))+
   theme_minimal()+
-  facet_wrap(~YEAR)+
+  facet_wrap(~YEAR, ncol=3)+
   labs(title='Steller sea lion haulouts and rookeries in Alaska')
 ```
 If we are after distributions in the 1990's use 1990-1999 and pool data from those years. Then use similar technique to the seabirds to draw circles around the colonies, depending on the foraging range. Then map those to the Atlantis boxes.
@@ -173,7 +187,7 @@ Need to read about trip distance and duration but it seems to change between mal
 
 Subset to data from the 1990's, take averages for each colony. 
 ```{r}
-nonpup_sf <- nonpup_sf %>% filter(YEAR %in% (1990:1999)) # use the 90's
+nonpup_sf <- nonpup_sf %>% filter(YEAR %in% (1971:1999)) # use the 90's
 
 nonpup_avg_ak <- nonpup_sf %>% group_by(SITE,REGION,ROOKERY) %>% summarise(COUNTS=mean(COUNTS,na.rm=TRUE))
 
@@ -331,10 +345,12 @@ colony_at_sea <- colony_at_sea %>% mutate(colony_area_at_sea=st_area(colony_at_s
 Write a function that takes each individual colony geometry and does st_intersect() with each Atlantis box. Bound to take a very long time.
 ```{r, warning=FALSE}
 # shed some variables
-box_thin <- atlantis_box %>% select(.bx0,boundary)
+box_thin <- atlantis_box %>% select(.bx0,botz,boundary)
 
-# calculate the area of the intersection with each atlantis box in the model, and scale the n of ind for that colony by the area of the intersection
+# calculate the area of the intersection with each atlantis box in the model, and scale the n of ind for that colony by the area of the intersection. Do not consider island boxes, because those count as land, but do consider boundary boxes.
 box_colony_overlap <- function(this_colony,colony_data,box_data){
+  
+  box_data <- box_data %>% filter(botz<0)
   
   colony_data <- colony_data %>% filter(SITE==this_colony)
   
@@ -372,7 +388,7 @@ abundance_by_box <- atlantis_abundances %>% group_by(.bx0) %>% summarise(abundan
 
 Join with box set again for the geometry and map.
 ```{r}
-atlantis_ssl <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box, by = '.bx0') %>%
+atlantis_ssl <- atlantis_box %>% select(.bx0,botz,area,boundary) %>% left_join(abundance_by_box, by = '.bx0') %>%
   mutate(log_abundance = log1p(abundance),
          density = abundance/area*1000000, # back to km2
          logdensity = log1p(density)) 
@@ -446,7 +462,7 @@ abundance_by_box_winter <- atlantis_abundances_winter %>% group_by(.bx0) %>% sum
 
 Join with box set again for the geometry and map.
 ```{r}
-atlantis_ssl_winter <- atlantis_box %>% select(.bx0,area,boundary) %>% left_join(abundance_by_box_winter, by = '.bx0') %>%
+atlantis_ssl_winter <- atlantis_box %>% select(.bx0,botz,area,boundary) %>% left_join(abundance_by_box_winter, by = '.bx0') %>%
   mutate(log_abundance = log1p(abundance),
          density = abundance/area*1000000, # back to km2
          logdensity = log1p(density)) 
@@ -467,19 +483,25 @@ p3
 # ggsave('ssl_box.png',p2,width=10,height=5,unit='in')
 ```
 
-Write out summer and winter distributions.
+Write out summer and winter distributions. Zero out the abundances in boundary boxes and island boxes.
 ```{r}
 s2_s3 <- atlantis_ssl %>% 
-  select(.bx0,abundance) %>% 
+  select(.bx0,botz,boundary,abundance) %>% 
   st_set_geometry(NULL) %>% 
+  rowwise() %>%
+  mutate(abundance = ifelse(isTRUE(boundary) | botz==0,0,abundance)) %>%
+  ungroup() %>%
   mutate(prop=abundance/sum(abundance,na.rm=T)) %>% 
-  select(-abundance)
+  select(-botz,-boundary,-abundance)
 
 s1_s4 <- atlantis_ssl_winter %>% 
-  select(.bx0,abundance) %>% 
+  select(.bx0,botz,boundary,abundance) %>% 
   st_set_geometry(NULL) %>% 
+  rowwise() %>%
+  mutate(abundance = ifelse(isTRUE(boundary) | botz==0,0,abundance)) %>%
+  ungroup() %>%
   mutate(prop=abundance/sum(abundance,na.rm=T)) %>% 
-  select(-abundance)
+  select(-botz,-boundary,-abundance)
 
 # turn NAs to 0 for now
 s2_s3[is.na(s2_s3)] <- 0
@@ -489,3 +511,5 @@ s1_s4[is.na(s1_s4)] <- 0
 write.csv(s2_s3, 'ssl_s2_s3.csv', row.names = F)
 write.csv(s1_s4, 'ssl_s1_s4.csv', row.names = F)
 ```
+
+At the moment we are assuming that juveniles and adults have the same spatial distributions.
