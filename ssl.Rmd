@@ -508,8 +508,8 @@ s2_s3[is.na(s2_s3)] <- 0
 s1_s4[is.na(s1_s4)] <- 0
 
 # write out
-write.csv(s2_s3, 'ssl_s2_s3.csv', row.names = F)
-write.csv(s1_s4, 'ssl_s1_s4.csv', row.names = F)
+write.csv(s2_s3, '../output/ssl_s2_s3.csv', row.names = F)
+write.csv(s1_s4, '../output/ssl_s1_s4.csv', row.names = F)
 ```
 
 At the moment we are assuming that juveniles and adults have the same spatial distributions.
